@@ -10,12 +10,16 @@ COPY requirements.txt .
 
 RUN pip install --upgrade pip
 
-# Install prebuilt dlib
+# Prebuilt dlib
 RUN pip install dlib-bin
 
-# Install face-recognition WITHOUT dependencies
+# Install face-recognition without dependencies
 RUN pip install face-recognition --no-deps
 
+# 🔥 THIS LINE YOU MISSED
+RUN pip install face-recognition-models
+
+# Other dependencies
 RUN pip install -r requirements.txt
 
 COPY . .

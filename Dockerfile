@@ -1,26 +1,21 @@
-FROM python:3.9-slim
+FROM python:3.9
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
+    cmake \
     libgl1 \
-    libglib2.0-0
+    libglib2.0-0 \
+    build-essential
 
 COPY requirements.txt .
 
 RUN pip install --upgrade pip
-
-# Prebuilt dlib
 RUN pip install dlib-bin
-
-# Install face-recognition without dependencies
-RUN pip install face-recognition --no-deps
-
-# 🔥 THIS LINE YOU MISSED
-RUN pip install face-recognition-models
-
-# Other dependencies
 RUN pip install -r requirements.txt
+
+# IMPORTANT FIX
+RUN pip install git+https://github.com/ageitgey/face_recognition_models
 
 COPY . .
 

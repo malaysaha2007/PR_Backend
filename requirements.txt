@@ -5,3 +5,4 @@ numpy
 pillow
 pymongo
 gunicorn
+face-recognition==1.3.0

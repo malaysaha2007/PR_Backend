@@ -12,16 +12,10 @@ COPY requirements.txt .
 
 RUN pip install --upgrade pip
 
-# install dlib binary (important)
 RUN pip install dlib-bin
 
-# 🔥 ADD THIS LINE (missing)
-RUN pip install face_recognition
-
-# install rest
 RUN pip install -r requirements.txt
 
-# install models
 RUN pip install git+https://github.com/ageitgey/face_recognition_models
 
 COPY . .

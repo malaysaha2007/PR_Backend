@@ -1,8 +1,0 @@
-[phases.setup]
-nixPkgs = ["python310", "python310Packages.pip"]
-
-[phases.install]
-cmds = ["python3 -m pip install -r requirements-cloud.txt"]
-
-[start]
-cmd = "python3 cloud_server.py"

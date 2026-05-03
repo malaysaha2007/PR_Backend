@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from datetime import datetime
 from flask_cors import CORS
 import face_recognition
 import os
@@ -210,8 +211,12 @@ def confirm_entry_exit():
     action = data.get("action")
     purpose = data.get("purpose")
 
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+from datetime import datetime, timedelta
 
+current_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)) \
+    .strftime("%Y-%m-%d %H:%M:%S")
+    
+    
     # ---------------- EXIT ----------------
     if action == "EXIT":
         student_phone = extract_student_phone(student)

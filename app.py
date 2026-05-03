@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify
-from datetime import datetime
 from flask_cors import CORS
 import face_recognition
 import os
@@ -19,8 +18,6 @@ CORS(app)
 def home():
     return "Backend is running"
 
-
-
 # ---------------- MONGODB ----------------
 client = MongoClient("mongodb+srv://malay07_db_user:Malay07%40@prproject.h4mjvbl.mongodb.net/?retryWrites=true&w=majority")
 db = client["main_gate_entry_exit_system"]
@@ -36,47 +33,8 @@ known_face_encodings = []
 known_face_ids = []
 
 # ======================================================
-# LOAD OR TRAIN ENCODINGS
+# LOAD ENCODINGS
 # ======================================================
-def train_faces():
-    encodings = []
-    ids = []
-
-    print("Training faces...")
-
-    for roll_no in os.listdir(DATASET_PATH):
-        person_dir = os.path.join(DATASET_PATH, roll_no)
-
-        if not os.path.isdir(person_dir):
-            continue
-
-        for img in os.listdir(person_dir):
-
-            if not img.lower().endswith((".jpg", ".jpeg", ".png")):
-                continue
-
-            img_path = os.path.join(person_dir, img)
-
-            try:
-                image = face_recognition.load_image_file(img_path)
-                face_enc = face_recognition.face_encodings(image)
-
-                if len(face_enc) == 1:
-                    encodings.append(face_enc[0])
-                    ids.append(roll_no)
-
-            except Exception as e:
-                print(f"Error in {img_path}: {e}")
-
-    # Save encodings
-    with open(ENCODINGS_FILE, "wb") as f:
-        pickle.dump({"encodings": encodings, "ids": ids}, f)
-
-    print("Training completed and saved")
-
-    return encodings, ids
-
-
 def load_encodings():
     if not os.path.exists(ENCODINGS_FILE):
         raise Exception("encodings.pkl missing. Generate locally first.")
@@ -86,8 +44,6 @@ def load_encodings():
         print("Encodings loaded successfully")
         return data["encodings"], data["ids"]
 
-
-# Load encodings
 known_face_encodings, known_face_ids = load_encodings()
 
 # ======================================================
@@ -119,7 +75,7 @@ def recognize_face():
     except:
         return jsonify({"status": "ERROR", "message": "Invalid image"}), 400
 
-    # Check face exists
+    # Face detection
     face_locations = face_recognition.face_locations(image_np)
 
     if len(face_locations) == 0:
@@ -128,13 +84,12 @@ def recognize_face():
     if len(face_locations) > 1:
         return jsonify({"status": "DENIED", "message": "Multiple faces not allowed"})
 
-    # Get encoding
     encodings = face_recognition.face_encodings(image_np, face_locations)
 
     if not encodings:
         return jsonify({"status": "DENIED", "message": "Face not clear"})
 
-    # Find best match
+    # Match face
     face_distances = face_recognition.face_distance(
         known_face_encodings,
         encodings[0]
@@ -147,7 +102,6 @@ def recognize_face():
 
     roll_no = known_face_ids[best_match_index]
 
-    # Fetch student
     student = students_collection.find_one(
         {"roll_no": roll_no},
         {"_id": 0, "password": 0}
@@ -159,10 +113,12 @@ def recognize_face():
     # ---------------- ENTRY / EXIT LOGIC ----------------
     last_log = entry_exit_collection.find_one(
         {"roll": roll_no},
-        sort=[("outTime", -1)]
+        sort=[("_id", -1)]   # ✅ FIX: latest record
     )
 
-    now = datetime.now()
+    # ✅ IST current time
+    now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+
     last_action_time = None
 
     if last_log and last_log.get("inTime") is None:
@@ -177,7 +133,8 @@ def recognize_face():
                 last_log["inTime"], "%Y-%m-%d %H:%M:%S"
             )
 
-    if last_action_time and now - last_action_time < timedelta(minutes=1):
+    # ✅ cooldown check
+    if last_action_time and (now - last_action_time).total_seconds() < 60:
         return jsonify({
             "status": "BLOCKED",
             "message": "Wait 1 minute before next action"
@@ -211,11 +168,9 @@ def confirm_entry_exit():
     action = data.get("action")
     purpose = data.get("purpose")
 
-    # ✅ IST time fix
     current_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)) \
         .strftime("%Y-%m-%d %H:%M:%S")
 
-    # ---------------- EXIT ----------------
     if action == "EXIT":
         student_phone = extract_student_phone(student)
 
@@ -239,7 +194,6 @@ def confirm_entry_exit():
             "outTime": current_time
         })
 
-    # ---------------- ENTRY ----------------
     entry_exit_collection.update_one(
         {"roll": student["roll_no"], "inTime": None},
         {"$set": {"inTime": current_time}}
@@ -250,13 +204,10 @@ def confirm_entry_exit():
         "action": "ENTRY",
         "inTime": current_time
     })
-    
-    
+
 # ======================================================
 # RUN SERVER
 # ======================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-    
-    

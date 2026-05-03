@@ -211,12 +211,10 @@ def confirm_entry_exit():
     action = data.get("action")
     purpose = data.get("purpose")
 
-from datetime import datetime, timedelta
+    # ✅ IST time fix
+    current_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)) \
+        .strftime("%Y-%m-%d %H:%M:%S")
 
-current_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)) \
-    .strftime("%Y-%m-%d %H:%M:%S")
-    
-    
     # ---------------- EXIT ----------------
     if action == "EXIT":
         student_phone = extract_student_phone(student)
@@ -252,7 +250,8 @@ current_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)) \
         "action": "ENTRY",
         "inTime": current_time
     })
-
+    
+    
 # ======================================================
 # RUN SERVER
 # ======================================================

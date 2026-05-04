@@ -9,6 +9,14 @@ import io
 from datetime import datetime, timedelta
 from pymongo import MongoClient
 import pickle
+import cloudinary
+import cloudinary.uploader
+
+cloudinary.config(
+    cloud_name="dbrjgcpkz",
+    api_key="179582722719283",
+    api_secret="hjyQQlHCtNXjO-kaXAfaE5XSD_I"
+)
 
 # ---------------- APP SETUP ----------------
 app = Flask(__name__)
@@ -27,24 +35,7 @@ entry_exit_collection = db["entry_exit_logs"]
 
 # ---------------- PATHS ----------------
 DATASET_PATH = "face_data"
-ENCODINGS_FILE = "encodings.pkl"
 
-known_face_encodings = []
-known_face_ids = []
-
-# ======================================================
-# LOAD ENCODINGS
-# ======================================================
-def load_encodings():
-    if not os.path.exists(ENCODINGS_FILE):
-        raise Exception("encodings.pkl missing. Generate locally first.")
-
-    with open(ENCODINGS_FILE, "rb") as f:
-        data = pickle.load(f)
-        print("Encodings loaded successfully")
-        return data["encodings"], data["ids"]
-
-known_face_encodings, known_face_ids = load_encodings()
 
 # ======================================================
 # HELPER FUNCTION
@@ -88,24 +79,35 @@ def recognize_face():
 
     if not encodings:
         return jsonify({"status": "DENIED", "message": "Face not clear"})
+    
+    
 
-    # Match face
-    face_distances = face_recognition.face_distance(
-        known_face_encodings,
-        encodings[0]
-    )
+        # ---------------- MATCH FACE USING DB ----------------
+    students = list(students_collection.find({}, {"_id": 0}))
 
-    best_match_index = np.argmin(face_distances)
+    best_match = None
+    min_distance = 1.0
 
-    if face_distances[best_match_index] > 0.45:
+    for s in students:
+        db_encoding = np.array(s.get("encoding", []))
+
+        if len(db_encoding) == 0:
+            continue
+
+        dist = face_recognition.face_distance([db_encoding], encodings[0])[0]
+
+        if dist < min_distance:
+            min_distance = dist
+            best_match = s
+
+    # Check match
+    if not best_match or min_distance > 0.45:
         return jsonify({"status": "DENIED", "message": "Unknown person"})
 
-    roll_no = known_face_ids[best_match_index]
+    roll_no = best_match["roll_no"]
+    student = best_match
 
-    student = students_collection.find_one(
-        {"roll_no": roll_no},
-        {"_id": 0, "password": 0}
-    )
+   
 
     if not student:
         return jsonify({"status": "ERROR", "message": "Student not found"})
@@ -204,6 +206,87 @@ def confirm_entry_exit():
         "action": "ENTRY",
         "inTime": current_time
     })
+    
+    
+    
+
+# ======================================================
+# ADD STUDENT (CLOUDINARY + MONGODB)
+# ======================================================
+@app.route("/api/add-student", methods=["POST"])
+def add_student():
+    data = request.get_json()
+
+    name = data.get("name")
+    roll_no = data.get("roll_no")
+    image_base64 = data.get("image")
+
+    if not name or not roll_no or not image_base64:
+        return jsonify({"status": "ERROR", "message": "Missing data"}), 400
+
+    try:
+        # Decode image
+        image_bytes = base64.b64decode(image_base64)
+
+        # Upload to Cloudinary
+        upload_result = cloudinary.uploader.upload(
+            io.BytesIO(image_bytes),
+            folder="students",
+            public_id=roll_no
+        )
+
+        image_url = upload_result["secure_url"]
+
+        # Convert image → numpy
+        image_np = np.array(
+            Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        )
+
+        # Generate encoding
+        encodings = face_recognition.face_encodings(image_np)
+
+        if len(encodings) != 1:
+            return jsonify({
+                "status": "ERROR",
+                "message": "Face not clear or multiple faces"
+            })
+
+        # Save in MongoDB (YOUR STRUCTURE)
+        students_collection.insert_one({
+            "name": name,
+            "roll_no": roll_no,
+            "branch": data.get("branch"),
+            "degree": data.get("degree"),
+            "hostel": data.get("hostel"),
+            "room": data.get("room"),
+
+            "contact": {
+                "student": data.get("student_phone"),
+                "parent": data.get("parent_phone")
+            },
+
+            "email": data.get("email"),
+            "password": roll_no,
+
+            # ✅ NEW
+            "image_url": image_url,
+            "encoding": encodings[0].tolist(),
+
+            # ✅ REQUIRED FORMAT
+            "created_at": datetime.now().strftime("%Y-%M-%D %H:%M:%S"),
+
+        })
+
+        return jsonify({
+            "status": "SUCCESS",
+            "message": "Student added successfully"
+        })
+
+    except Exception as e:
+        return jsonify({"status": "ERROR", "message": str(e)})
+    
+    
+    
 
 # ======================================================
 # RUN SERVER

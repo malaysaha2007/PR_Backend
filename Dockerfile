@@ -1,25 +1,23 @@
-FROM python:3.10-slim
+FROM python:3.9
 
 WORKDIR /app
 
-# Install system dependencies for dlib & face_recognition
 RUN apt-get update && apt-get install -y \
-    build-essential \
     cmake \
     libgl1 \
     libglib2.0-0 \
-    libx11-6 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential
 
-# Copy files
-COPY . .
+COPY requirements.txt .
 
-# Install Python dependencies
 RUN pip install --upgrade pip
+
+RUN pip install dlib-bin
+
 RUN pip install -r requirements.txt
 
-# Run app
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080"]
+RUN pip install git+https://github.com/ageitgey/face_recognition_models
+
+COPY . .
+
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000"]

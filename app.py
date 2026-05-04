@@ -1,17 +1,16 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import face_recognition
-import os
 import base64
 import numpy as np
 from PIL import Image
 import io
 from datetime import datetime, timedelta
 from pymongo import MongoClient
-import pickle
 import cloudinary
 import cloudinary.uploader
 
+# ---------------- CLOUDINARY ----------------
 cloudinary.config(
     cloud_name="dbrjgcpkz",
     api_key="179582722719283",
@@ -33,19 +32,11 @@ db = client["main_gate_entry_exit_system"]
 students_collection = db["students"]
 entry_exit_collection = db["entry_exit_logs"]
 
-# ---------------- PATHS ----------------
-DATASET_PATH = "face_data"
-
-
-# ======================================================
-# HELPER FUNCTION
-# ======================================================
+# ---------------- HELPER ----------------
 def extract_student_phone(student):
     contact = student.get("contact")
-
     if isinstance(contact, dict):
         return contact.get("student")
-
     return contact
 
 # ======================================================
@@ -66,7 +57,7 @@ def recognize_face():
     except:
         return jsonify({"status": "ERROR", "message": "Invalid image"}), 400
 
-    # Face detection
+    # Detect faces
     face_locations = face_recognition.face_locations(image_np)
 
     if len(face_locations) == 0:
@@ -79,11 +70,12 @@ def recognize_face():
 
     if not encodings:
         return jsonify({"status": "DENIED", "message": "Face not clear"})
-    
-    
 
-        # ---------------- MATCH FACE USING DB ----------------
+    # ---------------- MATCH FACE ----------------
     students = list(students_collection.find({}, {"_id": 0}))
+
+    if not students:
+        return jsonify({"status": "ERROR", "message": "No students in database"})
 
     best_match = None
     min_distance = 1.0
@@ -100,25 +92,18 @@ def recognize_face():
             min_distance = dist
             best_match = s
 
-    # Check match
     if not best_match or min_distance > 0.45:
         return jsonify({"status": "DENIED", "message": "Unknown person"})
 
-    roll_no = best_match["roll_no"]
     student = best_match
-
-   
-
-    if not student:
-        return jsonify({"status": "ERROR", "message": "Student not found"})
+    roll_no = student["roll_no"]
 
     # ---------------- ENTRY / EXIT LOGIC ----------------
     last_log = entry_exit_collection.find_one(
         {"roll": roll_no},
-        sort=[("_id", -1)]   # ✅ FIX: latest record
+        sort=[("_id", -1)]
     )
 
-    # ✅ IST current time
     now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 
     last_action_time = None
@@ -135,7 +120,7 @@ def recognize_face():
                 last_log["inTime"], "%Y-%m-%d %H:%M:%S"
             )
 
-    # ✅ cooldown check
+    # Cooldown check
     if last_action_time and (now - last_action_time).total_seconds() < 60:
         return jsonify({
             "status": "BLOCKED",
@@ -156,6 +141,7 @@ def recognize_face():
 
     return jsonify(response)
 
+
 # ======================================================
 # CONFIRM ENTRY / EXIT
 # ======================================================
@@ -174,13 +160,11 @@ def confirm_entry_exit():
         .strftime("%Y-%m-%d %H:%M:%S")
 
     if action == "EXIT":
-        student_phone = extract_student_phone(student)
-
         entry_exit_collection.insert_one({
             "name": student["name"],
             "roll": student["roll_no"],
             "email": student.get("email"),
-            "phone": student_phone,
+            "phone": extract_student_phone(student),
             "branch": student.get("branch"),
             "degree": student.get("degree"),
             "hostel": student.get("hostel"),
@@ -190,25 +174,15 @@ def confirm_entry_exit():
             "inTime": None
         })
 
-        return jsonify({
-            "status": "OK",
-            "action": "EXIT",
-            "outTime": current_time
-        })
+        return jsonify({"status": "OK", "action": "EXIT", "outTime": current_time})
 
     entry_exit_collection.update_one(
         {"roll": student["roll_no"], "inTime": None},
         {"$set": {"inTime": current_time}}
     )
 
-    return jsonify({
-        "status": "OK",
-        "action": "ENTRY",
-        "inTime": current_time
-    })
-    
-    
-    
+    return jsonify({"status": "OK", "action": "ENTRY", "inTime": current_time})
+
 
 # ======================================================
 # ADD STUDENT (CLOUDINARY + MONGODB)
@@ -217,32 +191,24 @@ def confirm_entry_exit():
 def add_student():
     data = request.get_json()
 
-    name = data.get("name")
-    roll_no = data.get("roll_no")
-    image_base64 = data.get("image")
-
-    if not name or not roll_no or not image_base64:
-        return jsonify({"status": "ERROR", "message": "Missing data"}), 400
+    if not data:
+        return jsonify({"status": "ERROR", "message": "Invalid data"}), 400
 
     try:
-        # Decode image
-        image_bytes = base64.b64decode(image_base64)
+        image_bytes = base64.b64decode(data["image"])
 
-        # Upload to Cloudinary
         upload_result = cloudinary.uploader.upload(
             io.BytesIO(image_bytes),
             folder="students",
-            public_id=roll_no
+            public_id=data["roll_no"]
         )
 
         image_url = upload_result["secure_url"]
 
-        # Convert image → numpy
         image_np = np.array(
             Image.open(io.BytesIO(image_bytes)).convert("RGB")
         )
 
-        # Generate encoding
         encodings = face_recognition.face_encodings(image_np)
 
         if len(encodings) != 1:
@@ -251,10 +217,9 @@ def add_student():
                 "message": "Face not clear or multiple faces"
             })
 
-        # Save in MongoDB (YOUR STRUCTURE)
         students_collection.insert_one({
-            "name": name,
-            "roll_no": roll_no,
+            "name": data["name"],
+            "roll_no": data["roll_no"],
             "branch": data.get("branch"),
             "degree": data.get("degree"),
             "hostel": data.get("hostel"),
@@ -266,27 +231,19 @@ def add_student():
             },
 
             "email": data.get("email"),
-            "password": roll_no,
+            "password": data["roll_no"],
 
-            # ✅ NEW
             "image_url": image_url,
             "encoding": encodings[0].tolist(),
 
-            # ✅ REQUIRED FORMAT
-            "created_at": datetime.now().strftime("%Y-%M-%D %H:%M:%S"),
-
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
 
-        return jsonify({
-            "status": "SUCCESS",
-            "message": "Student added successfully"
-        })
+        return jsonify({"status": "SUCCESS", "message": "Student added successfully"})
 
     except Exception as e:
         return jsonify({"status": "ERROR", "message": str(e)})
-    
-    
-    
+
 
 # ======================================================
 # RUN SERVER

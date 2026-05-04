@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from pymongo import MongoClient
 import cloudinary
 import cloudinary.uploader
+import face_recognition
+import os
 
 # ---------------- CLOUDINARY ----------------
 cloudinary.config(
@@ -20,6 +22,11 @@ cloudinary.config(
 app = Flask(__name__)
 CORS(app)
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    print("GLOBAL ERROR:", str(e))
+    return jsonify({"status": "ERROR", "message": str(e)})
+
 @app.route('/')
 def home():
     return "Backend is running"
@@ -29,10 +36,8 @@ def test():
     return "Server working fine"
 
 # ---------------- MONGODB ----------------
-client = MongoClient(
-    "mongodb+srv://malay07_db_user:Malay07%40@prproject.h4mjvbl.mongodb.net/?retryWrites=true&w=majority",
-    serverSelectionTimeoutMS=5000
-)
+client = MongoClient("mongodb+srv://malay07_db_user:Malay07%40@prproject.h4mjvbl.mongodb.net/?retryWrites=true&w=majority")
+
 db = client["main_gate_entry_exit_system"]
 
 students_collection = db["students"]

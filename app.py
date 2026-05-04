@@ -1,14 +1,213 @@
-from flask import Flask
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import face_recognition
+import os
+import base64
+import numpy as np
+from PIL import Image
+import io
+from datetime import datetime, timedelta
+from pymongo import MongoClient
+import pickle
 
+# ---------------- APP SETUP ----------------
 app = Flask(__name__)
+CORS(app)
 
-@app.route("/")
+@app.route('/')
 def home():
-    return "WORKING"
+    return "Backend is running"
 
-@app.route("/test")
-def test():
-    return "TEST OK"
+# ---------------- MONGODB ----------------
+client = MongoClient("mongodb+srv://malay07_db_user:Malay07%40@prproject.h4mjvbl.mongodb.net/?retryWrites=true&w=majority")
+db = client["main_gate_entry_exit_system"]
 
+students_collection = db["students"]
+entry_exit_collection = db["entry_exit_logs"]
+
+# ---------------- PATHS ----------------
+DATASET_PATH = "face_data"
+ENCODINGS_FILE = "encodings.pkl"
+
+known_face_encodings = []
+known_face_ids = []
+
+# ======================================================
+# LOAD ENCODINGS
+# ======================================================
+def load_encodings():
+    if not os.path.exists(ENCODINGS_FILE):
+        raise Exception("encodings.pkl missing. Generate locally first.")
+
+    with open(ENCODINGS_FILE, "rb") as f:
+        data = pickle.load(f)
+        print("Encodings loaded successfully")
+        return data["encodings"], data["ids"]
+
+known_face_encodings, known_face_ids = load_encodings()
+
+# ======================================================
+# HELPER FUNCTION
+# ======================================================
+def extract_student_phone(student):
+    contact = student.get("contact")
+
+    if isinstance(contact, dict):
+        return contact.get("student")
+
+    return contact
+
+# ======================================================
+# FACE RECOGNITION API
+# ======================================================
+@app.route("/api/recognize-face", methods=["POST"])
+def recognize_face():
+    data = request.get_json(silent=True)
+
+    if not data or "image" not in data:
+        return jsonify({"status": "ERROR", "message": "No image received"}), 400
+
+    # Decode image
+    try:
+        image_np = np.array(
+            Image.open(io.BytesIO(base64.b64decode(data["image"]))).convert("RGB")
+        )
+    except:
+        return jsonify({"status": "ERROR", "message": "Invalid image"}), 400
+
+    # Face detection
+    face_locations = face_recognition.face_locations(image_np)
+
+    if len(face_locations) == 0:
+        return jsonify({"status": "DENIED", "message": "No face detected"})
+
+    if len(face_locations) > 1:
+        return jsonify({"status": "DENIED", "message": "Multiple faces not allowed"})
+
+    encodings = face_recognition.face_encodings(image_np, face_locations)
+
+    if not encodings:
+        return jsonify({"status": "DENIED", "message": "Face not clear"})
+
+    # Match face
+    face_distances = face_recognition.face_distance(
+        known_face_encodings,
+        encodings[0]
+    )
+
+    best_match_index = np.argmin(face_distances)
+
+    if face_distances[best_match_index] > 0.45:
+        return jsonify({"status": "DENIED", "message": "Unknown person"})
+
+    roll_no = known_face_ids[best_match_index]
+
+    student = students_collection.find_one(
+        {"roll_no": roll_no},
+        {"_id": 0, "password": 0}
+    )
+
+    if not student:
+        return jsonify({"status": "ERROR", "message": "Student not found"})
+
+    # ---------------- ENTRY / EXIT LOGIC ----------------
+    last_log = entry_exit_collection.find_one(
+        {"roll": roll_no},
+        sort=[("_id", -1)]   # ✅ FIX: latest record
+    )
+
+    # ✅ IST current time
+    now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+    last_action_time = None
+
+    if last_log and last_log.get("inTime") is None:
+        action = "ENTRY"
+        last_action_time = datetime.strptime(
+            last_log["outTime"], "%Y-%m-%d %H:%M:%S"
+        )
+    else:
+        action = "EXIT"
+        if last_log and last_log.get("inTime"):
+            last_action_time = datetime.strptime(
+                last_log["inTime"], "%Y-%m-%d %H:%M:%S"
+            )
+
+    # ✅ cooldown check
+    if last_action_time and (now - last_action_time).total_seconds() < 60:
+        return jsonify({
+            "status": "BLOCKED",
+            "message": "Wait 1 minute before next action"
+        })
+
+    response = {
+        "status": "SUCCESS",
+        "action": action,
+        "student": student
+    }
+
+    if action == "ENTRY" and last_log:
+        response["last_exit"] = {
+            "purpose": last_log.get("purpose"),
+            "outTime": last_log.get("outTime")
+        }
+
+    return jsonify(response)
+
+# ======================================================
+# CONFIRM ENTRY / EXIT
+# ======================================================
+@app.route("/api/confirm-entry-exit", methods=["POST"])
+def confirm_entry_exit():
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"status": "ERROR", "message": "Invalid request"}), 400
+
+    student = data.get("student")
+    action = data.get("action")
+    purpose = data.get("purpose")
+
+    current_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)) \
+        .strftime("%Y-%m-%d %H:%M:%S")
+
+    if action == "EXIT":
+        student_phone = extract_student_phone(student)
+
+        entry_exit_collection.insert_one({
+            "name": student["name"],
+            "roll": student["roll_no"],
+            "email": student.get("email"),
+            "phone": student_phone,
+            "branch": student.get("branch"),
+            "degree": student.get("degree"),
+            "hostel": student.get("hostel"),
+            "room": student.get("room"),
+            "purpose": purpose,
+            "outTime": current_time,
+            "inTime": None
+        })
+
+        return jsonify({
+            "status": "OK",
+            "action": "EXIT",
+            "outTime": current_time
+        })
+
+    entry_exit_collection.update_one(
+        {"roll": student["roll_no"], "inTime": None},
+        {"$set": {"inTime": current_time}}
+    )
+
+    return jsonify({
+        "status": "OK",
+        "action": "ENTRY",
+        "inTime": current_time
+    })
+
+# ======================================================
+# RUN SERVER
+# ======================================================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)

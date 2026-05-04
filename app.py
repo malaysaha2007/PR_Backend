@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import face_recognition
 import base64
 import numpy as np
 from PIL import Image
@@ -25,8 +24,15 @@ CORS(app)
 def home():
     return "Backend is running"
 
+@app.route('/test')
+def test():
+    return "Server working fine"
+
 # ---------------- MONGODB ----------------
-client = MongoClient("mongodb+srv://malay07_db_user:Malay07%40@prproject.h4mjvbl.mongodb.net/?retryWrites=true&w=majority")
+client = MongoClient(
+    "mongodb+srv://malay07_db_user:Malay07%40@prproject.h4mjvbl.mongodb.net/?retryWrites=true&w=majority",
+    serverSelectionTimeoutMS=5000
+)
 db = client["main_gate_entry_exit_system"]
 
 students_collection = db["students"]
@@ -49,7 +55,6 @@ def recognize_face():
     if not data or "image" not in data:
         return jsonify({"status": "ERROR", "message": "No image received"}), 400
 
-    # Decode image
     try:
         image_np = np.array(
             Image.open(io.BytesIO(base64.b64decode(data["image"]))).convert("RGB")
@@ -57,7 +62,6 @@ def recognize_face():
     except:
         return jsonify({"status": "ERROR", "message": "Invalid image"}), 400
 
-    # Detect faces
     face_locations = face_recognition.face_locations(image_np)
 
     if len(face_locations) == 0:
@@ -71,11 +75,11 @@ def recognize_face():
     if not encodings:
         return jsonify({"status": "DENIED", "message": "Face not clear"})
 
-    # ---------------- MATCH FACE ----------------
+    # ✅ MATCH FACE (CORRECT POSITION)
     students = list(students_collection.find({}, {"_id": 0}))
 
     if not students:
-        return jsonify({"status": "ERROR", "message": "No students in database"})
+        return jsonify({"status": "ERROR", "message": "No students in DB"})
 
     best_match = None
     min_distance = 1.0
@@ -98,7 +102,6 @@ def recognize_face():
     student = best_match
     roll_no = student["roll_no"]
 
-    # ---------------- ENTRY / EXIT LOGIC ----------------
     last_log = entry_exit_collection.find_one(
         {"roll": roll_no},
         sort=[("_id", -1)]
@@ -120,7 +123,6 @@ def recognize_face():
                 last_log["inTime"], "%Y-%m-%d %H:%M:%S"
             )
 
-    # Cooldown check
     if last_action_time and (now - last_action_time).total_seconds() < 60:
         return jsonify({
             "status": "BLOCKED",

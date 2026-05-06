@@ -221,7 +221,7 @@ def recognize_face():
             if seconds < 60:
                 return jsonify({
                     "status": "BLOCKED",
-                    "message": "Wait 1 minute before next scan"
+                    "message": f"Dear {student['name']}, please wait 1 minute before next scan"
                 })
 
         return jsonify({

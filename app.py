@@ -1,16 +1,19 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import face_recognition
-import os
-import base64
 import numpy as np
 from PIL import Image
 import io
 from datetime import datetime, timedelta
 from pymongo import MongoClient
-import pickle
+import requests
+import cv2
+import base64
+import os
 
-# ---------------- APP SETUP ----------------
+# ======================================================
+# APP SETUP
+# ======================================================
 app = Flask(__name__)
 CORS(app)
 
@@ -18,196 +21,305 @@ CORS(app)
 def home():
     return "Backend is running"
 
-# ---------------- MONGODB ----------------
-client = MongoClient("mongodb+srv://malay07_db_user:Malay07%40@prproject.h4mjvbl.mongodb.net/?retryWrites=true&w=majority")
+
+# ======================================================
+# MONGODB SETUP
+# ======================================================
+client = MongoClient(
+    "mongodb+srv://malay07_db_user:Malay07%40@prproject.h4mjvbl.mongodb.net/?retryWrites=true&w=majority",
+    serverSelectionTimeoutMS=5000
+)
+
 db = client["main_gate_entry_exit_system"]
 
-students_collection = db["students"]
+students_collection = db["student_auth_data"]
 entry_exit_collection = db["entry_exit_logs"]
 
-# ---------------- PATHS ----------------
-DATASET_PATH = "face_data"
-ENCODINGS_FILE = "encodings.pkl"
-
-known_face_encodings = []
-known_face_ids = []
 
 # ======================================================
-# LOAD ENCODINGS
+# GENERATE EMBEDDING (USED BY WEB)
 # ======================================================
-def load_encodings():
-    if not os.path.exists(ENCODINGS_FILE):
-        raise Exception("encodings.pkl missing. Generate locally first.")
+@app.route('/generate-embedding', methods=['POST'])
+def generate_embedding():
 
-    with open(ENCODINGS_FILE, "rb") as f:
-        data = pickle.load(f)
-        print("Encodings loaded successfully")
-        return data["encodings"], data["ids"]
+    try:
+        data = request.get_json()
 
-known_face_encodings, known_face_ids = load_encodings()
+        if not data or "image_url" not in data:
+            return jsonify({
+                "error": "image_url missing"
+            }), 400
+
+        image_url = data["image_url"]
+
+        # Download image
+        response = requests.get(image_url, timeout=10)
+
+        img = Image.open(io.BytesIO(response.content)).convert("RGB")
+        img = np.array(img)
+
+        # Resize image
+        small_img = cv2.resize(
+            img,
+            (0, 0),
+            fx=0.5,
+            fy=0.5
+        )
+
+        # IMPORTANT
+        rgb_small = cv2.cvtColor(small_img, cv2.COLOR_BGR2RGB)
+
+        # SIMPLE ENCODING METHOD
+        encodings = face_recognition.face_encodings(rgb_small)
+
+        if len(encodings) == 0:
+            return jsonify({
+                "error": "No face found"
+            }), 400
+
+        return jsonify({
+            "embedding": encodings[0].tolist()
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
 
 # ======================================================
-# HELPER FUNCTION
-# ======================================================
-def extract_student_phone(student):
-    contact = student.get("contact")
-
-    if isinstance(contact, dict):
-        return contact.get("student")
-
-    return contact
-
-# ======================================================
-# FACE RECOGNITION API
+# FACE RECOGNITION (APP)
 # ======================================================
 @app.route("/api/recognize-face", methods=["POST"])
 def recognize_face():
-    data = request.get_json(silent=True)
 
-    if not data or "image" not in data:
-        return jsonify({"status": "ERROR", "message": "No image received"}), 400
-
-    # Decode image
     try:
-        image_np = np.array(
-            Image.open(io.BytesIO(base64.b64decode(data["image"]))).convert("RGB")
-        )
-    except:
-        return jsonify({"status": "ERROR", "message": "Invalid image"}), 400
+        data = request.get_json()
 
-    # Face detection
-    face_locations = face_recognition.face_locations(image_np)
+        if not data or "image" not in data:
+            return jsonify({
+                "status": "ERROR",
+                "message": "No image received"
+            }), 400
 
-    if len(face_locations) == 0:
-        return jsonify({"status": "DENIED", "message": "No face detected"})
+        # Decode base64 image
+        try:
+            image_data = base64.b64decode(data["image"])
 
-    if len(face_locations) > 1:
-        return jsonify({"status": "DENIED", "message": "Multiple faces not allowed"})
-
-    encodings = face_recognition.face_encodings(image_np, face_locations)
-
-    if not encodings:
-        return jsonify({"status": "DENIED", "message": "Face not clear"})
-
-    # Match face
-    face_distances = face_recognition.face_distance(
-        known_face_encodings,
-        encodings[0]
-    )
-
-    best_match_index = np.argmin(face_distances)
-
-    if face_distances[best_match_index] > 0.45:
-        return jsonify({"status": "DENIED", "message": "Unknown person"})
-
-    roll_no = known_face_ids[best_match_index]
-
-    student = students_collection.find_one(
-        {"roll_no": roll_no},
-        {"_id": 0, "password": 0}
-    )
-
-    if not student:
-        return jsonify({"status": "ERROR", "message": "Student not found"})
-
-    # ---------------- ENTRY / EXIT LOGIC ----------------
-    last_log = entry_exit_collection.find_one(
-        {"roll": roll_no},
-        sort=[("_id", -1)]   # ✅ FIX: latest record
-    )
-
-    # ✅ IST current time
-    now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-
-    last_action_time = None
-
-    if last_log and last_log.get("inTime") is None:
-        action = "ENTRY"
-        last_action_time = datetime.strptime(
-            last_log["outTime"], "%Y-%m-%d %H:%M:%S"
-        )
-    else:
-        action = "EXIT"
-        if last_log and last_log.get("inTime"):
-            last_action_time = datetime.strptime(
-                last_log["inTime"], "%Y-%m-%d %H:%M:%S"
+            image_np = np.array(
+                Image.open(io.BytesIO(image_data)).convert("RGB")
             )
 
-    # ✅ cooldown check
-    if last_action_time and (now - last_action_time).total_seconds() < 60:
+        except Exception:
+            return jsonify({
+                "status": "ERROR",
+                "message": "Invalid image"
+            }), 400
+
+        # Resize image
+        small_img = cv2.resize(
+            image_np,
+            (0, 0),
+            fx=0.5,
+            fy=0.5
+        )
+
+        # IMPORTANT
+        rgb_small = cv2.cvtColor(small_img, cv2.COLOR_BGR2RGB)
+
+        # SIMPLE ENCODING METHOD
+        encodings = face_recognition.face_encodings(rgb_small)
+
+        if len(encodings) == 0:
+            return jsonify({
+                "status": "DENIED",
+                "message": "No face detected"
+            })
+
+        if len(encodings) > 1:
+            return jsonify({
+                "status": "DENIED",
+                "message": "Multiple faces detected"
+            })
+
+        input_embedding = encodings[0]
+
+        # ======================================================
+        # MATCH FACE WITH DATABASE
+        # ======================================================
+        students = students_collection.find()
+
+        best_match = None
+        min_distance = 1.0
+
+        for student in students:
+
+            db_embedding = student.get("face_embedding")
+
+            if not db_embedding:
+                continue
+
+            db_embedding = np.array(db_embedding)
+
+            distance = face_recognition.face_distance(
+                [db_embedding],
+                input_embedding
+            )[0]
+
+            if distance < min_distance:
+                min_distance = distance
+                best_match = student
+
+        # MATCH THRESHOLD
+        if best_match is None or min_distance > 0.5:
+            return jsonify({
+                "status": "DENIED",
+                "message": "Unknown person"
+            })
+
+        student = best_match
+
+        # ======================================================
+        # ENTRY / EXIT LOGIC
+        # ======================================================
+        last_log = entry_exit_collection.find_one(
+            {"roll": student["roll_no"]},
+            sort=[("_id", -1)]
+        )
+
+        now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+        last_action_time = None
+
+        # LAST ACTION WAS EXIT → NOW ENTRY
+        if last_log and last_log.get("inTime") is None:
+
+            action = "ENTRY"
+
+            last_action_time = datetime.strptime(
+                last_log["outTime"],
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+        else:
+
+            action = "EXIT"
+
+            if last_log and last_log.get("inTime"):
+
+                last_action_time = datetime.strptime(
+                    last_log["inTime"],
+                    "%Y-%m-%d %H:%M:%S"
+                )
+
+        # COOLDOWN
+        if last_action_time:
+
+            seconds = (now - last_action_time).total_seconds()
+
+            if seconds < 60:
+                return jsonify({
+                    "status": "BLOCKED",
+                    "message": "Wait 1 minute before next scan"
+                })
+
         return jsonify({
-            "status": "BLOCKED",
-            "message": "Wait 1 minute before next action"
+            "status": "SUCCESS",
+            "action": action,
+            "student": {
+                "roll_no": student["roll_no"],
+                "name": student["name"],
+                "hostel": student.get("hostel"),
+                "room": student.get("room")
+            }
         })
 
-    response = {
-        "status": "SUCCESS",
-        "action": action,
-        "student": student
-    }
+    except Exception as e:
 
-    if action == "ENTRY" and last_log:
-        response["last_exit"] = {
-            "purpose": last_log.get("purpose"),
-            "outTime": last_log.get("outTime")
-        }
+        return jsonify({
+            "status": "ERROR",
+            "message": str(e)
+        }), 500
 
-    return jsonify(response)
 
 # ======================================================
 # CONFIRM ENTRY / EXIT
 # ======================================================
 @app.route("/api/confirm-entry-exit", methods=["POST"])
 def confirm_entry_exit():
-    data = request.get_json(silent=True)
 
-    if not data:
-        return jsonify({"status": "ERROR", "message": "Invalid request"}), 400
+    try:
+        data = request.get_json()
 
-    student = data.get("student")
-    action = data.get("action")
-    purpose = data.get("purpose")
+        if not data:
+            return jsonify({
+                "status": "ERROR",
+                "message": "Invalid request"
+            }), 400
 
-    current_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)) \
-        .strftime("%Y-%m-%d %H:%M:%S")
+        student = data.get("student")
+        action = data.get("action")
+        purpose = data.get("purpose", "")
 
-    if action == "EXIT":
-        student_phone = extract_student_phone(student)
+        current_time = (
+            datetime.utcnow() + timedelta(hours=5, minutes=30)
+        ).strftime("%Y-%m-%d %H:%M:%S")
 
-        entry_exit_collection.insert_one({
-            "name": student["name"],
-            "roll": student["roll_no"],
-            "email": student.get("email"),
-            "phone": student_phone,
-            "branch": student.get("branch"),
-            "degree": student.get("degree"),
-            "hostel": student.get("hostel"),
-            "room": student.get("room"),
-            "purpose": purpose,
-            "outTime": current_time,
-            "inTime": None
-        })
+        # EXIT
+        if action == "EXIT":
+
+            entry_exit_collection.insert_one({
+                "name": student["name"],
+                "roll": student["roll_no"],
+                "hostel": student.get("hostel"),
+                "room": student.get("room"),
+                "purpose": purpose,
+                "outTime": current_time,
+                "inTime": None
+            })
+
+            return jsonify({
+                "status": "OK",
+                "action": "EXIT",
+                "time": current_time
+            })
+
+        # ENTRY
+        entry_exit_collection.update_one(
+            {
+                "roll": student["roll_no"],
+                "inTime": None
+            },
+            {
+                "$set": {
+                    "inTime": current_time
+                }
+            }
+        )
 
         return jsonify({
             "status": "OK",
-            "action": "EXIT",
-            "outTime": current_time
+            "action": "ENTRY",
+            "time": current_time
         })
 
-    entry_exit_collection.update_one(
-        {"roll": student["roll_no"], "inTime": None},
-        {"$set": {"inTime": current_time}}
-    )
+    except Exception as e:
 
-    return jsonify({
-        "status": "OK",
-        "action": "ENTRY",
-        "inTime": current_time
-    })
+        return jsonify({
+            "status": "ERROR",
+            "message": str(e)
+        }), 500
+
 
 # ======================================================
 # RUN SERVER
 # ======================================================
 if __name__ == "__main__":
+
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )

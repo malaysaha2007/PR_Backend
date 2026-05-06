@@ -225,15 +225,21 @@ def recognize_face():
                 })
 
         return jsonify({
-            "status": "SUCCESS",
-            "action": action,
-            "student": {
-                "roll_no": student["roll_no"],
-                "name": student["name"],
-                "hostel": student.get("hostel"),
-                "room": student.get("room")
-            }
-        })
+    "status": "SUCCESS",
+    "action": action,
+
+    "student": {
+        "roll_no": student["roll_no"],
+        "name": student["name"],
+        "hostel": student.get("hostel"),
+        "room": student.get("room")
+    },
+
+    "last_exit": {
+        "outTime": last_log.get("outTime") if last_log else None,
+        "purpose": last_log.get("purpose") if last_log else None
+    }
+})
 
     except Exception as e:
 

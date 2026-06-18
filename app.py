@@ -19,7 +19,7 @@ CORS(app)
 
 @app.route('/')
 def home():
-    return "Backend is running"
+    return "Your App Backend Is Running"
 
 
 # ======================================================

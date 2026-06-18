@@ -34,6 +34,7 @@ db = client["main_gate_entry_exit_system"]
 
 students_collection = db["student_auth_data"]
 entry_exit_collection = db["entry_exit_logs"]
+vacation_collection = db["vacation_application"]
 
 
 # ======================================================
@@ -248,7 +249,6 @@ def recognize_face():
             "message": str(e)
         }), 500
 
-
 # ======================================================
 # CONFIRM ENTRY / EXIT
 # ======================================================
@@ -256,6 +256,7 @@ def recognize_face():
 def confirm_entry_exit():
 
     try:
+
         data = request.get_json()
 
         if not data:
@@ -272,26 +273,69 @@ def confirm_entry_exit():
             datetime.utcnow() + timedelta(hours=5, minutes=30)
         ).strftime("%Y-%m-%d %H:%M:%S")
 
+        # VACATION VALIDATION
+        if action == "EXIT" and purpose.upper() == "VACATION":
+
+            vacation = vacation_collection.find_one(
+                {
+                    "roll_no": student["roll_no"],
+                    "hostel_status": "Approved",
+                    "gate_status": "Approved",
+                     "vacation_status": "NOT_STARTED"
+                },
+                sort=[("_id", -1)]
+            )
+
+            if not vacation:
+                return jsonify({
+                    "status": "DENIED",
+                    "message": "Vacation not approved"
+                }), 403
+
         # EXIT
         if action == "EXIT":
 
             entry_exit_collection.insert_one({
-                "name": student["name"],
                 "roll": student["roll_no"],
                 "hostel": student.get("hostel"),
-                "room": student.get("room"),
                 "purpose": purpose,
                 "outTime": current_time,
                 "inTime": None
             })
 
+            if purpose.upper() == "VACATION":
+
+             vacation_collection.update_one(
+        {
+            "_id": vacation["_id"]
+        },
+        {
+            "$set": {
+                "vacation_status": "ACTIVE"
+            }
+        }
+    )
+
             return jsonify({
                 "status": "OK",
                 "action": "EXIT",
-                "time": current_time
+                "time": current_time,
+                 "message":
+        f"Vacation departure recorded successfully. "
+        f"Have a safe journey, {student['name']}."
             })
-
+            
+            
+            
         # ENTRY
+
+        last_exit = entry_exit_collection.find_one(
+            {
+                "roll": student["roll_no"],
+                "inTime": None
+            }
+        )
+
         entry_exit_collection.update_one(
             {
                 "roll": student["roll_no"],
@@ -304,10 +348,45 @@ def confirm_entry_exit():
             }
         )
 
+        active_vacation = vacation_collection.find_one(
+            {
+                "roll_no": student["roll_no"],
+                "vacation_status": "ACTIVE"
+            }
+        )
+    
+
+        if (
+            active_vacation and
+            last_exit and
+            last_exit.get("purpose", "").upper() == "VACATION"
+        ):
+
+            vacation_collection.update_one(
+                {
+                    "_id": active_vacation["_id"]
+                },
+                {
+                    "$set": {
+                        "vacation_status": "COMPLETED"
+                    }
+                }
+            )
+
+            message = (
+                f"Welcome back, {student['name']}.\n\n"
+                f"Your vacation has been successfully completed and "
+                f"your return has been recorded on {current_time}.\n\n"
+                f"Have a pleasant stay in the hostel."
+            )
+   
+            
+            
         return jsonify({
             "status": "OK",
             "action": "ENTRY",
-            "time": current_time
+            "time": current_time,
+            "message": message
         })
 
     except Exception as e:
@@ -316,7 +395,149 @@ def confirm_entry_exit():
             "status": "ERROR",
             "message": str(e)
         }), 500
+        
+        
+@app.route("/pending-gate-vacations")
+def pending_gate_vacations():
 
+    vacations = list(
+        vacation_collection.find(
+            {
+                "gate_status": "Pending"
+            },
+            {
+                "_id": 0
+            }
+        )
+    )
+
+    return jsonify(vacations)
+
+@app.route("/check-vacation/<roll_no>")
+def check_vacation(roll_no):
+
+    student = students_collection.find_one(
+        {"roll_no": roll_no}
+    )
+
+    student_name = (
+        student["name"]
+        if student else roll_no
+    )
+
+    # GET LATEST VACATION APPLICATION ONLY
+    vacation = vacation_collection.find_one(
+        {
+            "roll_no": roll_no
+        },
+        sort=[("_id", -1)]
+    )
+
+    # NO VACATION RECORD EXISTS
+    if not vacation:
+
+        return jsonify({
+            "allowed": False,
+            "status": "NO_ACTIVE_VACATION",
+            "message":
+                f"Dear {student_name}, you currently have no active vacation application."
+        })
+
+    # LATEST VACATION ALREADY COMPLETED
+    if vacation.get("vacation_status") == "COMPLETED":
+
+        return jsonify({
+            "allowed": False,
+            "status": "NO_ACTIVE_VACATION",
+            "message":
+                f"Dear {student_name}, you currently have no active vacation application."
+        })
+
+    # HOSTEL PENDING
+    if vacation.get("hostel_status") == "Pending":
+
+        return jsonify({
+            "allowed": False,
+            "status": "HOSTEL_PENDING",
+            "message":
+                f"Dear {student_name}, your applied vacation starts on "
+                f"{vacation.get('leave_date')}, still pending by Hostel Office.\n\n"
+                f"Please contact the Hostel Office."
+        })
+
+    # HOSTEL DENIED
+    if vacation.get("hostel_status") == "Denied":
+
+        denial_reason = vacation.get(
+            "hostel_denial_reason",
+            "No reason provided"
+        )
+
+        return jsonify({
+            "allowed": False,
+            "status": "HOSTEL_DENIED",
+            "message":
+                f"Dear {student_name}, your applied vacation starts on "
+                f"{vacation.get('leave_date')}, Denied by Hostel Office "
+                f"for this reason ({denial_reason}).\n\n"
+                f"Please contact the Hostel Office."
+        })
+
+    # GATE NOT REQUESTED
+    if vacation.get("gate_status") == "Not Requested":
+
+        vacation_collection.update_one(
+            {
+                "_id": vacation["_id"]
+            },
+            {
+                "$set": {
+                    "gate_status": "Pending"
+                }
+            }
+        )
+
+        return jsonify({
+            "allowed": True,
+            "return_date": vacation.get("return_date"),
+            "status": "WAITING_FOR_GATE_APPROVAL"
+        })
+
+    # GATE PENDING
+    if vacation.get("gate_status") == "Pending":
+
+        return jsonify({
+            "allowed": True,
+            "return_date": vacation.get("return_date"),
+            "status": "WAITING_FOR_GATE_APPROVAL"
+        })
+
+    # GATE DENIED
+    if vacation.get("gate_status") == "Denied":
+
+        return jsonify({
+            "allowed": False,
+            "status": "DENIED_BY_GATE",
+            "message":
+                f"Dear {student_name}, your applied vacation starts on "
+                f"{vacation.get('leave_date')}, Denied by Main Gate Security Office.\n\n"
+                f"Please contact the Main Gate Security Office or Hostel Office."
+        })
+
+    # GATE APPROVED
+    if vacation.get("gate_status") == "Approved":
+
+        return jsonify({
+            "allowed": True,
+            "status": "APPROVED_BY_GATE",
+            "return_date": vacation.get("return_date")
+        })
+
+    return jsonify({
+        "allowed": True,
+        "return_date": vacation.get("return_date"),
+        "gate_status": vacation.get("gate_status")
+    })
 
 # ======================================================
 # RUN SERVER

@@ -233,7 +233,8 @@ def recognize_face():
         "roll_no": student["roll_no"],
         "name": student["name"],
         "hostel": student.get("hostel"),
-        "room": student.get("room")
+        "room": student.get("room"),
+        "photo": student.get("face_images", [None])[0]
     },
 
     "last_exit": {
@@ -347,6 +348,15 @@ def confirm_entry_exit():
                 }
             }
         )
+        
+        print("Student:", student)
+        print("Action:", action)
+        print("Last Exit:", last_exit)
+        print("Active Vacation:", active_vacation)
+        
+        
+        message = f"Welcome back, {student['name']}."
+        
 
         active_vacation = vacation_collection.find_one(
             {
@@ -390,6 +400,7 @@ def confirm_entry_exit():
         })
 
     except Exception as e:
+        traceback.print_exc() 
 
         return jsonify({
             "status": "ERROR",

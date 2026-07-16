@@ -10,6 +10,7 @@ import requests
 import cv2
 import base64
 import os
+import traceback
 
 # ======================================================
 # APP SETUP
@@ -349,10 +350,6 @@ def confirm_entry_exit():
             }
         )
         
-        print("Student:", student)
-        print("Action:", action)
-        print("Last Exit:", last_exit)
-        print("Active Vacation:", active_vacation)
         
         
         message = f"Welcome back, {student['name']}."
